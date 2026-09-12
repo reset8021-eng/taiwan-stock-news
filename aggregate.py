@@ -63,6 +63,22 @@ CREATE INDEX IF NOT EXISTS idx_event_primary
     ON event(primary_stock_id, first_seen_at);
 CREATE INDEX IF NOT EXISTS idx_article_event ON article(event_id);
 CREATE INDEX IF NOT EXISTS idx_article_source ON article(source_id);
+
+-- 聚合判斷的流水紀錄。
+-- 原本稽核結果只寫成 markdown 檔，每次執行整份覆寫，
+-- 排程一天跑四次就只剩最後一班的判斷，樣本永遠累積不起來。
+CREATE TABLE IF NOT EXISTS audit_log (
+    audit_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_at     TEXT NOT NULL,
+    source_id  TEXT,
+    verdict    TEXT NOT NULL,
+    sim        REAL,
+    stock_id   TEXT,
+    new_title  TEXT,
+    cand_title TEXT,
+    from_desc  INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_audit_run ON audit_log(run_at);
 """
 
 
