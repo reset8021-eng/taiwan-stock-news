@@ -1,0 +1,53 @@
+name: RSS 來源探測
+
+# 這是手動執行的診斷工具，不碰 news.db，不影響每日流程。
+# 用途：確認 rss_sources.json 裡的候選網址能不能通，
+#       以及讓程式自己去各媒體首頁找出正確的 RSS 網址。
+
+on:
+  workflow_dispatch:
+    inputs:
+      discover:
+        description: '同時對各媒體首頁做 RSS 自動探索'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 取出儲存庫
+        uses: actions/checkout@v4
+
+      - name: 安裝 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安裝套件
+        run: pip install requests certifi feedparser
+
+      - name: 探測
+        continue-on-error: true
+        run: |
+          if [ "${{ github.event.inputs.discover }}" = "true" ]; then
+            python probe_rss.py --discover
+          else
+            python probe_rss.py
+          fi
+
+      - name: 提交結果
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -f rss_probe.md ]; then git add rss_probe.md; fi
+          if git diff --staged --quiet; then
+            echo "結果沒有變化，不提交"
+          else
+            git commit -m "RSS 探測 $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M')"
+            git push
+          fi
