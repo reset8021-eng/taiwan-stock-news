@@ -24,6 +24,12 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.ssl_ import create_urllib3_context
 
+try:
+    import certifi
+    CA_BUNDLE = certifi.where()
+except ImportError:
+    CA_BUNDLE = None
+
 from link import Linker
 
 TPE = timezone(timedelta(hours=8))
@@ -45,7 +51,10 @@ class RelaxedStrictAdapter(HTTPAdapter):
 
     def init_poolmanager(self, *args, **kwargs):
         ctx = create_urllib3_context()
-        ctx.load_default_certs()
+        if CA_BUNDLE:
+            ctx.load_verify_locations(cafile=CA_BUNDLE)
+        else:
+            ctx.load_default_certs()
         ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
         kwargs["ssl_context"] = ctx
         return super().init_poolmanager(*args, **kwargs)
