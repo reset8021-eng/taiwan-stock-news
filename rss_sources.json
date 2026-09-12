@@ -1,0 +1,94 @@
+{
+  "_說明": [
+    "這個檔案是資料不是程式，要加來源就改這裡，不用動 .py。",
+    "verified 欄位：'已驗證 YYYY-MM-DD' 表示 probe_rss.py 當時確認回傳合法 RSS。",
+    "tier：1=官方公告 2=主流財經媒體 3=一般新聞或聚合來源 4=其他。",
+    "min_interval_minutes：同一來源兩次抓取的最小間隔，防止手動重跑時打爆對方。",
+    "user_agent：選填，某個來源回 403 時在該筆加上這個欄位覆寫預設 UA。"
+  ],
+
+  "sources": [
+    {
+      "id": "cna_finance",
+      "name": "中央社 產經證券",
+      "tier": 2,
+      "url": "https://feeds.feedburner.com/rsscna/finance",
+      "enabled": true,
+      "verified": "已驗證 2026-09-12（20 筆，支援條件式請求）",
+      "min_interval_minutes": 20,
+      "note": "2026-09-12 實測：20 筆只產出 1 則名單內事件，內容偏稅收、匯率、油價、央行等總經。個股含量低但成本趨近於零（唯一支援 ETag 的來源，沒更新就回 304），先留著。中央社 RSS 使用條款限個人與非營利之非商業用途。"
+    },
+    {
+      "id": "cna_tech",
+      "name": "中央社 科技",
+      "tier": 2,
+      "url": "https://feeds.feedburner.com/rsscna/technology",
+      "enabled": true,
+      "verified": "已驗證 2026-09-12（20 筆，支援條件式請求）",
+      "min_interval_minutes": 30,
+      "note": "2026-09-12 啟用。台股前 150 大半數是電子半導體，科技分類的個股命中率應該遠高於產經分類。同樣支援條件式請求。"
+    },
+    {
+      "id": "yahoo_tw_market",
+      "name": "Yahoo 股市 台股動態",
+      "tier": 3,
+      "url": "https://tw.stock.yahoo.com/rss?category=tw-market",
+      "enabled": true,
+      "verified": "已驗證 2026-09-12（50 筆，不支援條件式請求）",
+      "min_interval_minutes": 20,
+      "note": "聚合型來源，一個 feed 涵蓋十幾家媒體。目前唯一的廣度來源。大盤行情播報也集中在這裡（2026-09-12 實測 50 筆裡有 12 筆被大盤噪音規則擋下）。"
+    },
+    {
+      "id": "yahoo_news",
+      "name": "Yahoo 股市 最新新聞",
+      "tier": 3,
+      "url": "https://tw.stock.yahoo.com/rss?category=news",
+      "enabled": true,
+      "verified": "已驗證 2026-09-12（50 筆，不支援條件式請求）",
+      "min_interval_minutes": 20,
+      "note": "2026-09-12 啟用，理由與當初「先不開」的判斷相反。當初怕它跟 tw-market 重疊會讓 source_count 虛胖，但同一篇文章網址相同，會被 url_hash 判成重複而不是併入，不會虛胖。而重疊帶來的『同一件事不同寫法』正是目前最缺、用來驗證聚合門檻的樣本。"
+    },
+    {
+      "id": "yahoo_research",
+      "name": "Yahoo 股市 研究報導",
+      "tier": 2,
+      "url": "https://tw.stock.yahoo.com/rss?category=research",
+      "enabled": true,
+      "verified": "已驗證 2026-09-12（50 筆，不支援條件式請求）",
+      "min_interval_minutes": 30,
+      "note": "法人報告與目標價。2026-09-12 產出 24 則事件，是目前產出最高的來源。待觀察：探測時最新一則距今 26.8 小時（週六），若平日仍長期停在 20 小時以上應把 tier 改成 3。"
+    },
+
+    {
+      "id": "cnyes_tw_stock",
+      "name": "鉅亨網 台股",
+      "tier": 2,
+      "url": "https://news.cnyes.com/rss/v1/news/category/tw_stock",
+      "enabled": false,
+      "verified": "未驗證（推論）",
+      "min_interval_minutes": 20,
+      "note": "推論依據：探索確認鉅亨的 RSS 路徑形狀是 /rss/v1/news/category/{分類}，台股新聞頁網址為 /news/cat/tw_stock。跑 probe_rss.py 確認；若可用就把 enabled 改成 true，這會是第一個非 Yahoo 的廣度來源。"
+    },
+    {
+      "id": "cnyes_headline",
+      "name": "鉅亨網 頭條",
+      "tier": 2,
+      "url": "https://news.cnyes.com/rss/v1/news/category/headline",
+      "enabled": false,
+      "verified": "未驗證（由 probe_rss.py --discover 從鉅亨首頁 link 標籤撈到）",
+      "min_interval_minutes": 20,
+      "note": "綜合分類，台股以外內容多，命中率預期低於 tw_stock。tw_stock 若不可用再退而用這個。"
+    }
+  ],
+
+  "_已排除": [
+    "moneydj：2026-09-12 候選網址回 HTTP 200 但內容是 HTML，首頁也撈不到任何 feed 連結。",
+    "money.udn.com、www.ctee.com.tw：首頁 link 標籤中沒有任何 feed 宣告。",
+    "推測已無公開 RSS，或首頁改為 JS 動態渲染。"
+  ],
+
+  "discover_sites": [
+    "https://news.cnyes.com/",
+    "https://www.cna.com.tw/about/rss.aspx"
+  ]
+}
