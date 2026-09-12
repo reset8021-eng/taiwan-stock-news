@@ -2,9 +2,8 @@ name: 台股消息面每日更新
 
 on:
   schedule:
-    # 注意：GitHub 的排程時間一律是 UTC，台灣時間要減 8 小時。
-    # 另外 GitHub 的排程常有 10 到 30 分鐘的延遲，這是正常現象，
-    # 所以下面的時間都抓得比實際需求早一點。
+    # GitHub 的排程時間一律是 UTC，台灣時間要減 8 小時。
+    # 另外 GitHub 排程常有 10 到 30 分鐘延遲，屬正常現象。
     - cron: '30 0 * * 1-5'   # 台北 08:30  開盤前
     - cron: '0 3 * * 1-5'    # 台北 11:00  盤中
     - cron: '45 6 * * 1-5'   # 台北 14:45  收盤後，順便更新市值名單
@@ -28,11 +27,11 @@ jobs:
           python-version: '3.12'
 
       - name: 安裝套件
-        run: pip install requests
+        run: pip install requests certifi
 
       - name: 更新市值名單與別名表
-        # 收盤價要 14:30 後才完整，所以只在下午那班更新。
-        # 但如果 aliases.json 還不存在（第一次執行），任何時間都要先建。
+        # 收盤價 14:30 後才完整，所以只在下午那班更新。
+        # 但 aliases.json 不存在時（第一次執行）任何時間都要先建。
         run: |
           HOUR=$(date -u +%H)
           if [ ! -f aliases.json ] || [ "$HOUR" = "06" ]; then
@@ -42,16 +41,27 @@ jobs:
           fi
 
       - name: 抓取重大訊息
+        # 非交易日或單一來源異常不應讓整個流程中斷
+        continue-on-error: true
         run: python mops_fetch.py
 
       - name: 產生摘要
+        continue-on-error: true
         run: python report.py --days 3
+
+      - name: 檢查產出
+        run: |
+          echo "=== 目前檔案 ==="
+          ls -la *.csv *.json *.db *.md *.txt 2>/dev/null || echo "（尚無產出）"
 
       - name: 提交結果
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A news.db digest.md universe.csv aliases.json collisions.txt
+          # 只加入實際存在的檔案，避免第一次執行時因檔案不存在而中斷
+          for f in news.db digest.md universe.csv aliases.json collisions.txt; do
+            if [ -f "$f" ]; then git add "$f"; fi
+          done
           if git diff --staged --quiet; then
             echo "沒有新資料，不提交"
           else
