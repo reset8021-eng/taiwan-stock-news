@@ -19,6 +19,7 @@ report.py — 從 news.db 產生可讀的每日摘要
 
 import argparse
 import csv
+import re
 import sqlite3
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -47,7 +48,17 @@ TIER_LABEL = {1: "公告", 2: "財經媒體", 3: "一般新聞", 4: "其他"}
 # 這幾類在個股區塊內優先，其餘按時間排
 PRIORITY = ["earnings", "revenue", "conference", "rating", "order", "capacity", "ma"]
 
-FOCUS_LIMIT = 20
+FOCUS_OFFICIAL = 10   # 焦點區給公告的固定名額
+FOCUS_MEDIA = 15      # 焦點區給媒體事件的固定名額
+
+# 法定樣板公告。依規定必須揭露，但資訊量趨近於零，
+# 第一次跑真實資料時它們佔滿了整個焦點區（子公司資金貸與、背書保證那一類）。
+# 不刪除，只把熱度打折讓它們沉下去，個股區塊裡還是看得到。
+ROUTINE = re.compile(
+    r"資金貸與|背書保證|處理準則第|公告標準|更正本公司|補充.{0,4}公告"
+    r"|受邀參加.{0,12}(法人說明會|論壇|說明會)"
+)
+ROUTINE_PENALTY = 0.25
 
 
 def load_names(path="universe.csv"):
@@ -104,7 +115,12 @@ def fmt_time(ts):
 
 
 def esc(s):
-    return (s or "").replace("|", "｜")
+    """表格欄位淨化。
+
+    MOPS 的主旨裡帶換行字元（公司自己在申報系統裡斷的行），
+    直接塞進 Markdown 表格會把那一列撐破，所以所有空白壓成單一空格。
+    """
+    return re.sub(r"\s+", " ", (s or "").replace("|", "｜")).strip()
 
 
 def headline_cell(headline, link_info, unverified):
@@ -165,32 +181,40 @@ def main():
                   "若今天是週末或國定假日，這是正常的。"]
     else:
         # ---------------------------------------------------------- 今日焦點
-        scored = [(heat(r[5], r[6], r[4], now_utc), r) for r in rows]
-        scored.sort(key=lambda x: -x[0])
+        def score(r):
+            h = heat(r[5], r[6], r[4], now_utc)
+            return h * ROUTINE_PENALTY if ROUTINE.search(r[1] or "") else h
 
-        # tier 1 強制保留：先把公告挑出來，再用熱度補滿剩下的名額
-        official = [(h, r) for h, r in scored if r[6] == 1]
-        others = [(h, r) for h, r in scored if r[6] != 1]
-        focus = official[:FOCUS_LIMIT] + others[:max(0, FOCUS_LIMIT - len(official))]
-        focus.sort(key=lambda x: -x[0])
+        scored = sorted(((score(r), r) for r in rows), key=lambda x: -x[0])
+        official = [(h, r) for h, r in scored if r[6] == 1][:FOCUS_OFFICIAL]
+        media = [(h, r) for h, r in scored if r[6] != 1][:FOCUS_MEDIA]
 
-        lines += [
-            "## 今日焦點",
-            "",
+        # 分成兩張表而不是一張。
+        # 原本的寫法是「公告優先、剩下的名額給媒體」，結果 42 則公告把 20 個
+        # 名額全部佔滿，媒體事件一則都排不進來，接媒體的意義完全看不到。
+        # 公告與媒體本來就是不同性質的東西，熱度分數也不可比
+        # （公告永遠只有一個來源），硬排在同一張表本身就是錯的。
+        def focus_table(title, items, note):
+            out = [f"## {title}", "", note, "",
+                   "| 熱度 | 個股 | 類型 | 家數 | 時間 | 內容 |",
+                   "|---|---|---|---|---|---|"]
+            if not items:
+                return [f"## {title}", "", note, "", "（這段期間沒有）", ""]
+            for h, (ev, headline, etype, sid, ts, cnt, tier, unv) in items:
+                out.append(
+                    f"| {h:.2f} | {names.get(sid, '')} {sid} "
+                    f"| {TYPE_LABEL.get(etype, etype)} | {cnt} | {fmt_time(ts)} "
+                    f"| {headline_cell(headline, links.get(ev), unv)} |")
+            return out + [""]
+
+        lines += focus_table(
+            "今日焦點　官方公告", official,
+            "依規定必須揭露的樣板公告（子公司資金貸與、背書保證等）"
+            "熱度已打折，會沉到後面，在個股區塊仍看得到。")
+        lines += focus_table(
+            "今日焦點　媒體消息", media,
             "熱度 = log(1+來源家數) × 來源權重 × 時間衰減。"
-            "官方公告一律保留，不受熱度排擠。",
-            "",
-            "| 熱度 | 個股 | 類型 | 來源 | 家數 | 時間 | 內容 |",
-            "|---|---|---|---|---|---|---|",
-        ]
-        for h, (ev, headline, etype, sid, ts, cnt, tier, unv) in focus:
-            lines.append(
-                f"| {h:.2f} | {names.get(sid, '')} {sid} "
-                f"| {TYPE_LABEL.get(etype, etype)} | {TIER_LABEL.get(tier, tier)} "
-                f"| {cnt} | {fmt_time(ts)} "
-                f"| {headline_cell(headline, links.get(ev), unv)} |"
-            )
-        lines += [""]
+            "家數大於 1 代表多家媒體同時在報，是熱度的主要訊號。")
 
         # ---------------------------------------------------------- 依個股
         order = sorted(by_stock, key=lambda s: ranks.get(s, 9999))
