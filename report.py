@@ -108,11 +108,37 @@ def load_names(path="universe.csv", imap=None):
     return names, ranks, inds, unknown
 
 
-def load_best_links(conn, event_ids):
-    """每則事件挑一個代表連結：來源層級最權威、其次最早發布的那一篇。
+# 來源短名。版面上「中央社 產經證券」太長，取空白前的第一段就夠識別。
+SOURCE_SHORT_OVERRIDE = {"mops": "公告"}
+SOURCE_NAME_FALLBACK = {"mops": "公開資訊觀測站重大訊息"}
 
-    MOPS 的 article 沒有 url（公告本身沒有穩定的對外連結），
-    這種情況會退回找次一級來源的連結，都沒有就不放連結。
+
+def load_source_names(path="rss_sources.json"):
+    names = dict(SOURCE_NAME_FALLBACK)
+    try:
+        with open(path, encoding="utf-8") as f:
+            for src in json.load(f).get("sources", []):
+                names[src["id"]] = src.get("name", src["id"])
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError):
+        pass
+    return names
+
+
+def short_source(source_id, names):
+    if source_id in SOURCE_SHORT_OVERRIDE:
+        return SOURCE_SHORT_OVERRIDE[source_id]
+    full = names.get(source_id, source_id)
+    return full.split()[0] if full.split() else full
+
+
+def load_event_sources(conn, event_ids, names):
+    """每則事件的代表連結與實際來源媒體。
+
+    來源依 tier 排序，所以第一個就是最權威的那家。
+    一件事被多家報導時，版面上顯示「鉅亨網 等 3 家」比單純顯示數字有用得多，
+    因為「誰在報」跟「幾家在報」是兩種不同的訊號。
+
+    MOPS 公告沒有穩定的對外連結，url 會是空的，這種情況就不放連結。
     """
     if not event_ids:
         return {}
@@ -121,12 +147,23 @@ def load_best_links(conn, event_ids):
     rows = conn.execute(
         f"""SELECT event_id, url, source_id
             FROM article
-            WHERE event_id IN ({qmarks}) AND url IS NOT NULL AND url != ''
+            WHERE event_id IN ({qmarks})
             ORDER BY source_tier ASC, published_at ASC""",
         list(event_ids),
     )
     for ev, url, src in rows:
-        out.setdefault(ev, (url, src))
+        d = out.setdefault(ev, {"url": None, "ids": []})
+        if url and not d["url"]:
+            d["url"] = url
+        if src not in d["ids"]:
+            d["ids"].append(src)
+
+    for ev, d in out.items():
+        shorts = [short_source(i, names) for i in d["ids"]]
+        # 同一家的不同分類 feed（Yahoo 有三個）算同一家，不要重複顯示
+        uniq = list(dict.fromkeys(shorts))
+        d["outlets"] = uniq
+        d["label"] = uniq[0] if len(uniq) == 1 else f"{uniq[0]} 等 {len(uniq)} 家"
     return out
 
 
@@ -161,9 +198,8 @@ def esc(s):
 def headline_cell(headline, link_info, unverified):
     """標題欄。未證實的消息要一眼看得出來，不能跟公告混在一起。"""
     text = esc(headline)
-    if link_info:
-        url, _src = link_info
-        text = f"[{text}]({url})"
+    if link_info and link_info.get("url"):
+        text = f"[{text}]({link_info['url']})"
     if unverified:
         text = "傳聞　" + text
     return text
@@ -179,7 +215,7 @@ def write_web(path, rows, links, names, ranks, inds, health, days):
     now = datetime.now(timezone.utc)
     events = []
     for ev, headline, etype, sid, ts, cnt, tier, unv in rows:
-        link = links.get(ev)
+        link = links.get(ev) or {}
         events.append({
             "id": ev,
             "headline": esc(headline),
@@ -195,7 +231,9 @@ def write_web(path, rows, links, names, ranks, inds, health, days):
             "unverified": bool(unv),
             "time": ts,
             "heat": round(heat(cnt, tier, ts, now), 4),
-            "url": link[0] if link else None,
+            "url": link.get("url"),
+            "source": link.get("label", ""),
+            "outlets": link.get("outlets", []),
         })
 
     feeds = []
@@ -258,7 +296,8 @@ def main():
         (since,),
     ).fetchall()
 
-    links = load_best_links(conn, [r[0] for r in rows])
+    src_names = load_source_names()
+    links = load_event_sources(conn, [r[0] for r in rows], src_names)
 
     by_stock = defaultdict(list)
     for r in rows:
@@ -311,14 +350,16 @@ def main():
         # （公告永遠只有一個來源），硬排在同一張表本身就是錯的。
         def focus_table(title, items, note):
             out = [f"## {title}", "", note, "",
-                   "| 熱度 | 個股 | 類型 | 家數 | 時間 | 內容 |",
+                   "| 熱度 | 個股 | 類型 | 來源 | 時間 | 內容 |",
                    "|---|---|---|---|---|---|"]
             if not items:
                 return [f"## {title}", "", note, "", "（這段期間沒有）", ""]
             for h, (ev, headline, etype, sid, ts, cnt, tier, unv) in items:
+                info = links.get(ev) or {}
                 out.append(
                     f"| {h:.2f} | {names.get(sid, '')} {sid} "
-                    f"| {TYPE_LABEL.get(etype, etype)} | {cnt} | {fmt_time(ts)} "
+                    f"| {TYPE_LABEL.get(etype, etype)} | {esc(info.get('label', '—'))} "
+                    f"| {fmt_time(ts)} "
                     f"| {headline_cell(headline, links.get(ev), unv)} |")
             return out + [""]
 
@@ -377,11 +418,15 @@ def main():
                 bits.append(ind)
             lines += [f"### {names.get(sid, '')} {sid}"
                       + ("　" + "　".join(bits) if bits else ""), ""]
-            lines += ["| 時間 | 類型 | 來源 | 家數 | 內容 |", "|---|---|---|---|---|"]
+            lines += ["| 時間 | 類型 | 來源 | 內容 |", "|---|---|---|---|"]
             for ev, headline, etype, _s, ts, cnt, tier, unv in evs:
+                # 來源欄顯示實際媒體而非層級。層級已經由「公告/傳聞」的標記
+                # 與排序表達過了，這裡重複一次沒有新資訊；
+                # 「是鉅亨還是中央社在報」才是看的時候真正想知道的事。
+                info = links.get(ev) or {}
                 lines.append(
                     f"| {fmt_time(ts)} | {TYPE_LABEL.get(etype, etype)} "
-                    f"| {TIER_LABEL.get(tier, tier)} | {cnt} "
+                    f"| {esc(info.get('label', '—'))} "
                     f"| {headline_cell(headline, links.get(ev), unv)} |"
                 )
             lines += [""]
