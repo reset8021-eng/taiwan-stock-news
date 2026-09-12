@@ -20,15 +20,7 @@ import ssl
 import sys
 from datetime import datetime, timezone, timedelta
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.ssl_ import create_urllib3_context
-
-try:
-    import certifi
-    CA_BUNDLE = certifi.where()
-except ImportError:
-    CA_BUNDLE = None
+from netutil import fetch_json
 
 from link import Linker
 
@@ -41,29 +33,6 @@ MOPS_ENDPOINTS = [
     ("TPEx", "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap04_O"),
     ("TPEx", "https://www.tpex.org.tw/openapi/v1/opendata/t187ap04_O"),
 ]
-
-HEADERS = {"User-Agent": "mops-fetcher/0.1"}
-
-
-class RelaxedStrictAdapter(HTTPAdapter):
-    """tpex.org.tw 憑證缺 Subject Key Identifier，Python 3.13+ 的嚴格檢查會擋下來。
-    只關掉 strict 這一項，憑證鏈與主機名稱驗證照常。"""
-
-    def init_poolmanager(self, *args, **kwargs):
-        ctx = create_urllib3_context()
-        if CA_BUNDLE:
-            ctx.load_verify_locations(cafile=CA_BUNDLE)
-        else:
-            ctx.load_default_certs()
-        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
-        kwargs["ssl_context"] = ctx
-        return super().init_poolmanager(*args, **kwargs)
-
-
-SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
-SESSION.mount("https://", RelaxedStrictAdapter())
-
 
 # ---------------------------------------------------------------- 事件分類
 
@@ -176,9 +145,9 @@ def roc_to_iso(date_str, time_str=None):
 
 
 def fetch_endpoint(url):
-    r = SESSION.get(url, timeout=30)
-    r.raise_for_status()
-    data = r.json()
+    # 櫃買憑證鏈不完整，允許降級重試（見 netutil.py）
+    insecure_ok = "tpex.org.tw" in url
+    data, _ = fetch_json(url, allow_insecure=insecure_ok)
     return data if isinstance(data, list) else []
 
 
