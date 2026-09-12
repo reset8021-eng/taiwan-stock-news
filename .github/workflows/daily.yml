@@ -1,0 +1,60 @@
+name: 台股消息面每日更新
+
+on:
+  schedule:
+    # 注意：GitHub 的排程時間一律是 UTC，台灣時間要減 8 小時。
+    # 另外 GitHub 的排程常有 10 到 30 分鐘的延遲，這是正常現象，
+    # 所以下面的時間都抓得比實際需求早一點。
+    - cron: '30 0 * * 1-5'   # 台北 08:30  開盤前
+    - cron: '0 3 * * 1-5'    # 台北 11:00  盤中
+    - cron: '45 6 * * 1-5'   # 台北 14:45  收盤後，順便更新市值名單
+    - cron: '30 9 * * 1-5'   # 台北 17:30  盤後補抓
+  workflow_dispatch:          # 允許在網頁上手動按按鈕執行
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 取出儲存庫
+        uses: actions/checkout@v4
+
+      - name: 安裝 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安裝套件
+        run: pip install requests
+
+      - name: 更新市值名單與別名表
+        # 收盤價要 14:30 後才完整，所以只在下午那班更新。
+        # 但如果 aliases.json 還不存在（第一次執行），任何時間都要先建。
+        run: |
+          HOUR=$(date -u +%H)
+          if [ ! -f aliases.json ] || [ "$HOUR" = "06" ]; then
+            python build_universe.py --top 150 --seed alias_seed.json
+          else
+            echo "略過名單更新（非收盤後時段）"
+          fi
+
+      - name: 抓取重大訊息
+        run: python mops_fetch.py
+
+      - name: 產生摘要
+        run: python report.py --days 3
+
+      - name: 提交結果
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A news.db digest.md universe.csv aliases.json collisions.txt
+          if git diff --staged --quiet; then
+            echo "沒有新資料，不提交"
+          else
+            git commit -m "自動更新 $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M')"
+            git push
+          fi
