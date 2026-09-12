@@ -8,7 +8,12 @@ on:
     - cron: '0 3 * * 1-5'    # 台北 11:00  盤中
     - cron: '45 6 * * 1-5'   # 台北 14:45  收盤後，順便更新市值名單
     - cron: '30 9 * * 1-5'   # 台北 17:30  盤後補抓
-  workflow_dispatch:          # 允許在網頁上手動按按鈕執行
+    workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: '強制重建市值名單'
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -32,9 +37,10 @@ jobs:
       - name: 更新市值名單與別名表
         # 收盤價 14:30 後才完整，所以只在下午那班更新。
         # 但 aliases.json 不存在時（第一次執行）任何時間都要先建。
-        run: |
+                run: |
           HOUR=$(date -u +%H)
-          if [ ! -f aliases.json ] || [ "$HOUR" = "06" ]; then
+          FORCE="${{ github.event.inputs.force_rebuild }}"
+          if [ ! -f aliases.json ] || [ "$HOUR" = "06" ] || [ "$FORCE" = "true" ]; then
             python build_universe.py --top 150 --seed alias_seed.json
           else
             echo "略過名單更新（非收盤後時段）"
