@@ -51,6 +51,11 @@ PRIORITY = ["earnings", "revenue", "conference", "rating", "order", "capacity", 
 FOCUS_OFFICIAL = 10   # 焦點區給公告的固定名額
 FOCUS_MEDIA = 15      # 焦點區給媒體事件的固定名額
 
+# 同一檔在焦點區最多佔幾列。權值股會被寫進幾乎每一則新聞的標題，
+# 不設限的話焦點區永遠是台積電（實測 15 列裡它佔 6 列）。
+# 超出的不會消失，在個股區塊照樣看得到。
+FOCUS_PER_STOCK = 2
+
 # 法定樣板公告。依規定必須揭露，但資訊量趨近於零，
 # 第一次跑真實資料時它們佔滿了整個焦點區（子公司資金貸與、背書保證那一類）。
 # 不刪除，只把熱度打折讓它們沉下去，個股區塊裡還是看得到。
@@ -186,8 +191,20 @@ def main():
             return h * ROUTINE_PENALTY if ROUTINE.search(r[1] or "") else h
 
         scored = sorted(((score(r), r) for r in rows), key=lambda x: -x[0])
-        official = [(h, r) for h, r in scored if r[6] == 1][:FOCUS_OFFICIAL]
-        media = [(h, r) for h, r in scored if r[6] != 1][:FOCUS_MEDIA]
+
+        def pick(items, limit):
+            used, out = defaultdict(int), []
+            for h, r in items:
+                if used[r[3]] >= FOCUS_PER_STOCK:
+                    continue
+                used[r[3]] += 1
+                out.append((h, r))
+                if len(out) >= limit:
+                    break
+            return out
+
+        official = pick([(h, r) for h, r in scored if r[6] == 1], FOCUS_OFFICIAL)
+        media = pick([(h, r) for h, r in scored if r[6] != 1], FOCUS_MEDIA)
 
         # 分成兩張表而不是一張。
         # 原本的寫法是「公告優先、剩下的名額給媒體」，結果 42 則公告把 20 個
