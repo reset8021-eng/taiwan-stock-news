@@ -153,3 +153,67 @@ def fetch_json(url, allow_insecure=False, timeout=30, retries=3):
                 break  # 非暫時性錯誤，換下一個驗證層級
 
     raise last_err
+
+# ---------------------------------------------------------------- 原始內容抓取
+
+def _get_raw(url, level, strict, verify, timeout, extra_headers):
+    sess = _session(strict, verify)
+    if extra_headers:
+        sess.headers.update({k: v for k, v in extra_headers.items() if v})
+    if level == "insecure":
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            r = sess.get(url, timeout=timeout, verify=False)
+    else:
+        r = sess.get(url, timeout=timeout)
+    # 304 是條件式請求的正常結果，不是錯誤，不能讓 raise_for_status 擋掉
+    if r.status_code == 304:
+        return r
+    r.raise_for_status()
+    return r
+
+
+def fetch_bytes(url, extra_headers=None, allow_insecure=False,
+                timeout=30, retries=3):
+    """抓取原始位元組，給 RSS 這類非 JSON 的來源用。
+
+    回傳 (status_code, content, headers)。
+    status_code 為 304 時 content 是空的，代表「內容自上次抓取後沒有變動」，
+    呼叫端應該直接略過，不需要重新剖析。這是條件式請求（ETag /
+    Last-Modified）的運作方式，也是把每日請求量壓下來最有效的手段。
+
+    重試與 TLS 降級的邏輯跟 fetch_json 一致，共用同一組 Session 設定，
+    差別只在不做 JSON 剖析、也不做 OpenAPI 的結構檢查
+    （RSS 的結構檢查由 feedparser 那一層負責）。
+    """
+    attempts = [("strict", True, True), ("relaxed", False, True)]
+    if allow_insecure:
+        attempts.append(("insecure", False, False))
+
+    last_err = None
+    for level, strict, verify in attempts:
+        for attempt in range(retries):
+            try:
+                r = _get_raw(url, level, strict, verify, timeout, extra_headers)
+                if level == "insecure":
+                    print(
+                        f"  ⚠ {url}\n"
+                        f"    憑證驗證失敗，已降級為不驗證連線取得資料。",
+                        file=sys.stderr,
+                    )
+                return r.status_code, r.content, dict(r.headers)
+
+            except Exception as e:
+                last_err = e
+                if _is_transient(e) and attempt < retries - 1:
+                    wait = (2 ** attempt) + random.uniform(0, 1)
+                    print(
+                        f"  連線中斷（{type(e).__name__}），"
+                        f"{wait:.1f} 秒後重試 {attempt + 2}/{retries}：{url}",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait)
+                    continue
+                break
+
+    raise last_err
