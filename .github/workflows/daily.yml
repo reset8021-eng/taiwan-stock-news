@@ -86,6 +86,8 @@ jobs:
         run: |
           echo "=== 目前檔案 ==="
           ls -la *.csv *.json *.db *.md *.txt 2>/dev/null || echo "（尚無產出）"
+          echo "=== 網站資料 ==="
+          ls -la docs/ 2>/dev/null || echo "（docs/ 還不存在，請先上傳 docs/index.html）"
 
       - name: 提交結果
         run: |
@@ -95,6 +97,9 @@ jobs:
           for f in news.db digest.md cluster_audit.md universe.csv aliases.json collisions.txt; do
             if [ -f "$f" ]; then git add "$f"; fi
           done
+          # 網站資料。docs/ 就是 GitHub Pages 的發佈目錄，
+          # 這一行提交完成的同時網站就會更新（Pages 部署約再等一分鐘）。
+          if [ -f docs/data.json ]; then git add docs/data.json; fi
           if git diff --staged --quiet; then
             echo "沒有新資料，不提交"
           else
