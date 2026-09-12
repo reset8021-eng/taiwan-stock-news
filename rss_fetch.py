@@ -90,6 +90,18 @@ _MARKET_WORDS = re.compile(
 )
 
 
+# 公司名出現在社會新聞或花絮裡。2026-09-12 實測撿到
+# 「台積電工程師『輪夜班難顧孩』？離婚爭2幼子親權竟輸了」這種。
+# 條件寫窄：必須是明確的私人生活字眼，不碰公司本身的訴訟與人事。
+_OFFTOPIC = re.compile(
+    r"離婚|親權|扶養費|外遇|告別式|喪禮|婚禮|小三|命理|星座|樂透|中獎"
+)
+
+
+def is_offtopic(title: str) -> bool:
+    return bool(_OFFTOPIC.search(title))
+
+
 def is_market_noise(title: str, primary_id: str, linker: Linker) -> bool:
     """判斷這則是不是「大盤行情播報」而非個股消息。
 
@@ -326,7 +338,7 @@ def ingest_entries(conn, linker, src, entries, *, use_desc=False,
 
         # 大盤行情播報不建事件。放在對股之後才判斷，是因為要知道主角是誰
         # 才能檢查它在標題裡是不是只以 ADR 或期貨的形式出現。
-        if is_market_noise(title, primary, linker):
+        if is_market_noise(title, primary, linker) or is_offtopic(title):
             st["market"] += 1
             continue
 
@@ -362,8 +374,10 @@ def ingest_entries(conn, linker, src, entries, *, use_desc=False,
              published.isoformat(), now.isoformat(), ev_id),
         )
 
-        # 只記錄需要人眼判斷的情況，merge 分數低或 grey 或被擋下
-        if verdict != "new" and cand:
+        # 只要有找到候選就記錄，包含判成新事件的。
+        # 上一輪只記 merge / grey / blocked，結果稽核檔只有 1 組，
+        # 完全看不出「差一點就該併」的配對有多少，等於無法判斷門檻高低。
+        if cand:
             audit.append({
                 "verdict": verdict, "sim": sim, "stock": primary,
                 "new": title, "cand": cand, "src": sid,
@@ -403,6 +417,10 @@ def write_audit(audit, path="cluster_audit.md"):
          "如果這區大量都是該併的，代表合併門檻設太高，把 --sim-merge 調低。"),
         ("被守門規則擋下", [a for a in audit if a["verdict"].startswith("new(擋下")],
          "分數很高卻被擋，通常是對的（例如調升與調降）。若發現誤擋，改 aggregate.py 的 _OPPOSITES。"),
+        ("差一點（有候選但分數未達灰帶）",
+         [a for a in audit if a["verdict"] == "new" and a["sim"] >= 0.15],
+         "這一區是判斷門檻高低的主要依據。若裡面大量是同一件事，"
+         "代表灰帶下緣 --sim-grey 設太高；若幾乎都是不同的事，代表目前門檻合理。"),
     ]
 
     for name, items, hint in groups:
