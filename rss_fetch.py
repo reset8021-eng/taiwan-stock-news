@@ -136,6 +136,70 @@ def is_market_noise(title: str, primary_id: str, linker: Linker) -> bool:
     return seen
 
 
+# ---------------------------------------------------------------- 誤配確認
+
+# 財經語境字眼。出現任一個，才承認地雷別名的配對。
+# 這串刻意涵蓋得寬，因為它的工作是「排除完全無關的新聞」，
+# 不是「挑出重要新聞」；抓太緊會把正常的公司消息一起擋掉。
+FINANCE_CONTEXT = re.compile(
+    r"股價|股票|股東|股利|股份|營收|財報|財測|法說|董事會|目標價|評等"
+    r"|外資|投信|自營|法人|分析師|投顧|券商|市值|籌碼|融資|融券"
+    r"|漲|跌|開盤|收盤|盤中|盤後|掛牌|上市|上櫃|興櫃|除息|除權|增資|減資"
+    r"|訂單|接單|出貨|產能|擴廠|建廠|毛利|營益|EPS|每股|季報|月營收"
+    r"|併購|收購|入股|轉投資|報價|供應鏈|客戶|代工|營運|獲利|虧損"
+    r"|處分|取得|資產|廠房|設備|業外|認列|收益|盈餘|配息|配股|庫藏|買回"
+    r"|標案|得標|合約|簽約|投資|資本支出|稼動|良率|漲價|降價|庫存|拉貨|砍單"
+    r"|營業|業績|銷售|出口|接獲|擴產|量產|投產|新廠|子公司|集團|上下游"
+)
+
+_CODE4 = re.compile(r"\d{4}")
+
+
+def load_ambiguous(path="ambiguous_alias.json"):
+    """載入「剛好是常用詞」的公司簡稱清單。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return set(json.load(f).get("ambiguous", []))
+    except (FileNotFoundError, json.JSONDecodeError, AttributeError, TypeError):
+        return set()
+
+
+def longest_alias_hit(title: str, sid: str, linker: Linker) -> str:
+    """這檔是靠哪個別名被比中的。link.py 不回傳這個資訊，這裡重新推一次。"""
+    best = ""
+    for a in linker.aliases.get(sid, []):
+        if a in title and len(a) > len(best):
+            best = a
+    return best
+
+
+def confirm_stocks(title, stocks, linker, ambiguous):
+    """剔除疑似誤配的個股，回傳 (通過的個股, 被剔除的別名)。
+
+    地雷別名（統一、全新、可成、南亞…）必須有旁證才算數：
+    標題出現該檔股號，或標題有財經語境字眼。
+
+    為什麼不是直接把這些別名從別名表拿掉：那樣「統一8月營收創高」
+    也會一起失效，而那是我們真正要的東西。問題不在別名本身，
+    在於缺少判斷它是不是在講公司的依據。
+    """
+    kept, rejected = [], []
+    for sid, rel in stocks:
+        alias = longest_alias_hit(title, sid, linker)
+        if alias not in ambiguous:
+            kept.append((sid, rel))
+            continue
+        if sid in _CODE4.findall(title) or FINANCE_CONTEXT.search(title):
+            kept.append((sid, rel))
+        else:
+            rejected.append(alias)
+
+    # 主角被剔除時，讓剩下的第一檔遞補成 primary
+    if kept and kept[0][1] != "primary":
+        kept[0] = (kept[0][0], "primary")
+    return kept, rejected
+
+
 # ---------------------------------------------------------------- 對股
 
 _DOWNGRADE = {"primary": "direct", "direct": "indirect", "indirect": "indirect"}
@@ -283,19 +347,22 @@ def fetch_source(conn, src, force=False, timeout=30):
 # ---------------------------------------------------------------- 寫入
 
 def ingest_entries(conn, linker, src, entries, *, use_desc=False,
-                   max_age_days=7, audit=None):
+                   max_age_days=7, audit=None, ambiguous=None,
+                   mismatch_log=None):
     """把一個來源的項目寫進資料庫。回傳統計 dict。
 
     抽成獨立函式是為了可測試：不需要網路就能餵假資料進來驗證聚合行為。
     """
     audit = audit if audit is not None else []
+    ambiguous = ambiguous if ambiguous is not None else set()
+    mismatch_log = mismatch_log if mismatch_log is not None else []
     now = datetime.now(timezone.utc)
     oldest = now - timedelta(days=max_age_days)
     tier = int(src.get("tier", 3))
     sid = src["id"]
 
     st = {"new": 0, "merged": 0, "grey": 0, "blocked": 0, "market": 0,
-          "dup": 0, "retitled": 0, "unmatched": 0, "stale": 0}
+          "mismatch": 0, "dup": 0, "retitled": 0, "unmatched": 0, "stale": 0}
 
     for e in entries:
         title = (e.get("title") or "").strip()
@@ -332,6 +399,12 @@ def ingest_entries(conn, linker, src, entries, *, use_desc=False,
         stocks, from_desc = link_stocks(linker, title, desc, use_desc)
         if not stocks:
             st["unmatched"] += 1
+            continue
+
+        stocks, rejected = confirm_stocks(title, stocks, linker, ambiguous)
+        if not stocks:
+            st["mismatch"] += 1
+            mismatch_log.append((rejected[0] if rejected else "", title))
             continue
 
         primary = stocks[0][0]
@@ -509,6 +582,7 @@ def main():
                          "預設關閉：2026-09-12 實測精確度太差，"
                          "撿回來的是「巴西力爭東協完整夥伴」這類完全無關的新聞")
     ap.add_argument("--max-age-days", type=int, default=7)
+    ap.add_argument("--ambiguous", default="ambiguous_alias.json")
     ap.add_argument("--audit", default="cluster_audit.md")
     ap.add_argument("--audit-days", type=int, default=3,
                     help="稽核檔涵蓋最近幾天的判斷。紀錄累積在資料庫，不會被覆寫")
@@ -548,7 +622,11 @@ def main():
     conn = open_db(args.db)
     aggregate.ensure_schema(conn)
 
-    audit, totals = [], {}
+    ambiguous = load_ambiguous(args.ambiguous)
+    if not ambiguous:
+        print(f"（找不到 {args.ambiguous}，誤配確認未啟用）", file=sys.stderr)
+
+    audit, totals, mismatch_log = [], {}, []
     print(f"門檻：合併 ≥ {aggregate.SIM_MERGE}　灰帶 ≥ {aggregate.SIM_GREY}"
           f"　{aggregate.NGRAM}-gram\n")
 
@@ -561,9 +639,10 @@ def main():
         st = ingest_entries(conn, linker, src, entries,
                             use_desc=args.use_desc,
                             max_age_days=args.max_age_days,
-                            audit=audit)
+                            audit=audit, ambiguous=ambiguous,
+                            mismatch_log=mismatch_log)
         print("  新事件 {new}　併入 {merged}　灰帶 {grey}　守門擋下 {blocked}　"
-              "大盤噪音 {market}　重複 {dup}　改標 {retitled}　"
+              "大盤噪音 {market}　疑似誤配 {mismatch}　重複 {dup}　改標 {retitled}　"
               "不在名單 {unmatched}".format(**st))
         for k, v in st.items():
             totals[k] = totals.get(k, 0) + v
@@ -573,10 +652,18 @@ def main():
     print("\n=== 合計 ===")
     if totals:
         print("新事件 {new}　併入既有 {merged}　灰帶 {grey}　守門擋下 {blocked}　"
-              "大盤噪音 {market}　重複 {dup}　改標 {retitled}　"
+              "大盤噪音 {market}　疑似誤配 {mismatch}　重複 {dup}　改標 {retitled}　"
               "不在名單 {unmatched}".format(**totals))
     print(f"稽核檔：{args.audit}　本次 {len(audit)} 組判斷，"
           f"檔案涵蓋最近 {args.audit_days} 天共 {total_audit} 組")
+
+    # 印出被誤配確認擋下的標題，方便判斷清單要不要補
+    if mismatch_log:
+        print(f"\n疑似誤配、已丟棄（{len(mismatch_log)} 則，最多列 8 則）：")
+        for alias, t in mismatch_log[:8]:
+            print(f"  「{alias}」 ← {t[:52]}")
+        print("  若其中有該留下的，或發現還有漏網的，"
+              "改 ambiguous_alias.json 的 ambiguous 陣列")
 
     for w in health_check(conn, cfg.get("sources", [])):
         print(w, file=sys.stderr)
