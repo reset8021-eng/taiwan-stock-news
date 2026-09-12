@@ -26,6 +26,12 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.ssl_ import create_urllib3_context
 
+try:
+    import certifi
+    CA_BUNDLE = certifi.where()
+except ImportError:
+    CA_BUNDLE = None
+
 TPE = timezone(timedelta(hours=8))
 
 TWSE_PROFILE = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
@@ -59,7 +65,12 @@ class RelaxedStrictAdapter(HTTPAdapter):
 
     def init_poolmanager(self, *args, **kwargs):
         ctx = create_urllib3_context()
-        ctx.load_default_certs()
+        # certifi 的憑證庫跨平台一致。Windows 用系統憑證庫可以過，
+        # 但 Linux（GitHub Actions）會出現 unable to get local issuer certificate
+        if CA_BUNDLE:
+            ctx.load_verify_locations(cafile=CA_BUNDLE)
+        else:
+            ctx.load_default_certs()
         ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
         kwargs["ssl_context"] = ctx
         return super().init_poolmanager(*args, **kwargs)
@@ -226,8 +237,21 @@ def main():
         seed = {}
 
     records = {}
-    records.update(load_market(TWSE_PROFILE, TWSE_DAILY, "TWSE"))
-    records.update(load_market(TPEX_PROFILE, TPEX_DAILY, "TPEx"))
+    for label, prof, daily in (
+        ("TWSE", TWSE_PROFILE, TWSE_DAILY),
+        ("TPEx", TPEX_PROFILE, TPEX_DAILY),
+    ):
+        try:
+            got = load_market(prof, daily, label)
+            records.update(got)
+            print(f"{label} 取得 {len(got)} 檔")
+        except Exception as e:
+            print(f"{label} 抓取失敗，本次略過：{type(e).__name__}: {e}",
+                  file=sys.stderr)
+
+    if not records:
+        print("兩個市場都抓不到資料，中止。", file=sys.stderr)
+        sys.exit(1)
 
     scored = []
     skipped = []
