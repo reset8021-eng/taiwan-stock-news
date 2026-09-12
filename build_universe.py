@@ -22,15 +22,7 @@ import ssl
 import sys
 from datetime import datetime, timezone, timedelta
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.ssl_ import create_urllib3_context
-
-try:
-    import certifi
-    CA_BUNDLE = certifi.where()
-except ImportError:
-    CA_BUNDLE = None
+from netutil import fetch_json
 
 TPE = timezone(timedelta(hours=8))
 
@@ -56,37 +48,6 @@ NOISE_WORDS = [
 ]
 
 
-class RelaxedStrictAdapter(HTTPAdapter):
-    """
-    Python 3.13+ 預設啟用 VERIFY_X509_STRICT，而 tpex.org.tw 的憑證缺少
-    Subject Key Identifier 擴充欄位，會被判為不合格。
-    這裡只關掉 strict 這一項，憑證鏈與主機名稱驗證仍然照常執行。
-    """
-
-    def init_poolmanager(self, *args, **kwargs):
-        ctx = create_urllib3_context()
-        # certifi 的憑證庫跨平台一致。Windows 用系統憑證庫可以過，
-        # 但 Linux（GitHub Actions）會出現 unable to get local issuer certificate
-        if CA_BUNDLE:
-            ctx.load_verify_locations(cafile=CA_BUNDLE)
-        else:
-            ctx.load_default_certs()
-        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
-        kwargs["ssl_context"] = ctx
-        return super().init_poolmanager(*args, **kwargs)
-
-
-SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
-SESSION.mount("https://", RelaxedStrictAdapter())
-
-
-def fetch(url):
-    r = SESSION.get(url, timeout=30)
-    r.raise_for_status()
-    return r.json()
-
-
 def to_float(x):
     if x is None:
         return None
@@ -106,10 +67,11 @@ def pick(row, *keys):
     return None
 
 
-def load_market(profile_url, daily_url, market_label):
+def load_market(profile_url, daily_url, market_label, allow_insecure=False):
     """回傳 {stock_id: {...}}，合併基本資料與當日收盤。"""
     profiles = {}
-    for row in fetch(profile_url):
+    profile_data, _ = fetch_json(profile_url, allow_insecure)
+    for row in profile_data:
         sid = pick(row, "公司代號", "SecuritiesCompanyCode")
         if not sid or EXCLUDE_PATTERN.match(sid):
             continue
@@ -124,7 +86,8 @@ def load_market(profile_url, daily_url, market_label):
             "capital": capital,
         }
 
-    for row in fetch(daily_url):
+    daily_data, _ = fetch_json(daily_url, allow_insecure)
+    for row in daily_data:
         sid = pick(row, "Code", "SecuritiesCompanyCode", "證券代號")
         if sid not in profiles:
             continue
@@ -227,6 +190,9 @@ def main():
     ap.add_argument("--top", type=int, default=150)
     ap.add_argument("--seed", default="alias_seed.json")
     ap.add_argument("--outdir", default=".")
+    ap.add_argument("--no-insecure-tpex", dest="allow_insecure_tpex",
+                    action="store_false", default=True,
+                    help="不允許對櫃買降級連線，櫃買抓不到就跳過")
     args = ap.parse_args()
 
     try:
@@ -237,12 +203,13 @@ def main():
         seed = {}
 
     records = {}
-    for label, prof, daily in (
-        ("TWSE", TWSE_PROFILE, TWSE_DAILY),
-        ("TPEx", TPEX_PROFILE, TPEX_DAILY),
+    for label, prof, daily, insecure in (
+        # 櫃買伺服器憑證鏈不完整，允許降級重試，詳見 netutil.py
+        ("TWSE", TWSE_PROFILE, TWSE_DAILY, False),
+        ("TPEx", TPEX_PROFILE, TPEX_DAILY, args.allow_insecure_tpex),
     ):
         try:
-            got = load_market(prof, daily, label)
+            got = load_market(prof, daily, label, insecure)
             records.update(got)
             print(f"{label} 取得 {len(got)} 檔")
         except Exception as e:
