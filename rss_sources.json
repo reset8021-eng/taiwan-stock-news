@@ -64,7 +64,7 @@
       "name": "鉅亨網 台股",
       "tier": 2,
       "url": "https://news.cnyes.com/rss/v1/news/category/tw_stock",
-      "enabled": false,
+      "enabled": true,
       "verified": "未驗證（推論）",
       "min_interval_minutes": 20,
       "note": "推論依據：探索確認鉅亨的 RSS 路徑形狀是 /rss/v1/news/category/{分類}，台股新聞頁網址為 /news/cat/tw_stock。跑 probe_rss.py 確認；若可用就把 enabled 改成 true，這會是第一個非 Yahoo 的廣度來源。"
