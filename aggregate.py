@@ -152,36 +152,56 @@ def find_candidates(conn, stock_id: str, when: datetime):
 
 
 def match_event(conn, title: str, stock_id: str, when: datetime):
-    """回傳 (event_id 或 None, 判定, 最高相似度, 對照標題)。
+    """回傳 (event_id 或 None, 判定, 相似度, 對照標題)。
 
-    判定：merge / grey / new
+    判定：merge / merge(LLM) / grey / new / new(擋下:理由)
+
+    2026-09-12 修正兩個錯誤：
+
+    1. 原本只挑相似度最高的候選做守門檢查，於是相似度 0.05、本來就該判新事件
+       的配對，只要撞到反向詞或數字不交集也會被記成「擋下」，稽核檔上出現一堆
+       假的擋下紀錄。現在只有分數有進灰帶的候選才做守門檢查。
+    2. 最高分的候選被擋下之後，原本直接宣告新事件。正確做法是退而比對次高的
+       候選，因為被擋下只代表「那一則不是它」，不代表沒有別的事件是它。
     """
     norm = normalize_title(title)
     grams = char_ngrams(norm, NGRAM)
 
-    best = (0.0, None, "", "")
+    scored = []
     for ev_id, headline, *_ in find_candidates(conn, stock_id, when):
         cand_norm = normalize_title(headline)
-        sim = jaccard(grams, char_ngrams(cand_norm, NGRAM))
-        if sim <= best[0]:
-            continue
-        reason = conflict(norm, cand_norm)
-        best = (sim, ev_id, headline, reason)
-
-    sim, ev_id, headline, reason = best
-    if ev_id is None:
+        scored.append((jaccard(grams, char_ngrams(cand_norm, NGRAM)),
+                       ev_id, headline, cand_norm))
+    if not scored:
         return None, "new", 0.0, ""
-    if reason:
-        # 被守門規則擋下：不管分數多高都當新事件
-        return None, f"new(擋下:{reason})", sim, headline
-    if sim >= SIM_MERGE:
-        return ev_id, "merge", sim, headline
-    if sim >= SIM_GREY:
+
+    scored.sort(key=lambda x: -x[0])
+    top_sim, _, top_headline, _ = scored[0]
+    blocked = None
+
+    for sim, ev_id, headline, cand_norm in scored:
+        if sim < SIM_GREY:
+            break  # 已排序，後面只會更低
+
+        reason = conflict(norm, cand_norm)
+        if reason:
+            # 記下第一個被擋的，繼續看次高的候選
+            if blocked is None:
+                blocked = (reason, sim, headline)
+            continue
+
+        if sim >= SIM_MERGE:
+            return ev_id, "merge", sim, headline
+
         verdict = llm_same_event(title, headline)
         if verdict is True:
             return ev_id, "merge(LLM)", sim, headline
         return None, "grey", sim, headline
-    return None, "new", sim, headline
+
+    if blocked:
+        reason, sim, headline = blocked
+        return None, f"new(擋下:{reason})", sim, headline
+    return None, "new", top_sim, top_headline
 
 
 def create_event(conn, *, headline, event_type, stocks, tier,
