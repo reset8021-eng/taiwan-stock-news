@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>台股消息面</title>
+<meta name="description" content="上市櫃市值前 150 大的公告與媒體消息，每個交易日更新四次。">
+<style>
+/* ------------------------------------------------------------------
+   設計說明
+
+   這個版面要解決的問題不是「好不好看」，是「分辨可信度」。
+   同一個畫面上混著依法公告的事實、媒體報導、未證實的傳聞，
+   三者份量差很多，瀏覽時卻極容易被當成同一種東西。
+
+   所以每一列左邊的標線就是資訊本身，不是裝飾：
+     粗實線  官方公告，事實
+     細實線  財經媒體
+     虛線    一般新聞或聚合來源
+     琥珀色  未經證實的傳聞，不論來源層級
+
+   底色用偏冷的淺灰藍而非純白，長時間看列表不刺眼，
+   在舊螢幕與日光下也比深色底可讀。
+   紅色只保留給「熱度」這一件事（台股的紅是熱、是動），不拿來做裝飾。
+------------------------------------------------------------------- */
+
+:root{
+  --paper:#edf0f3;
+  --card:#f7f9fa;
+  --ink:#1b2026;
+  --muted:#5c6773;
+  --faint:#8a95a1;
+  --rule:#ccd4db;
+  --official:#1f6f5c;
+  --media:#3d4b5c;
+  --rumour:#9a6a12;
+  --hot:#c2352b;
+
+  --s1:.4rem; --s2:.75rem; --s3:1.25rem; --s4:2rem; --s5:3.25rem;
+}
+
+*{box-sizing:border-box;}
+html{-webkit-text-size-adjust:100%;}
+body{
+  margin:0;
+  background:var(--paper);
+  color:var(--ink);
+  font-family:"Noto Sans TC","PingFang TC","Microsoft JhengHei",
+              "Hiragino Sans GB",system-ui,sans-serif;
+  font-size:16px;
+  line-height:1.65;
+  font-variant-numeric:tabular-nums;
+}
+a{color:inherit;}
+
+.wrap{max-width:47rem;margin:0 auto;padding:0 var(--s3);}
+
+/* ---------------------------------------------------------- 頁首 */
+.masthead{
+  border-bottom:1px solid var(--rule);
+  padding:var(--s3) 0 var(--s2);
+  display:flex;align-items:baseline;justify-content:space-between;
+  gap:var(--s2);flex-wrap:wrap;
+}
+.masthead h1{
+  font-size:1.05rem;font-weight:700;margin:0;letter-spacing:.04em;
+}
+.stamp{color:var(--muted);font-size:.82rem;}
+
+/* ---------------------------------------------------------- 頭條
+   首屏放「現在最該看的那一則」，而不是大數字加漸層。
+   這個版面的工作是分流注意力，所以最characteristic的東西就是頭條本身。 */
+.lead{padding:var(--s4) 0 var(--s3);border-bottom:1px solid var(--rule);}
+.lead-meta{
+  font-size:.82rem;color:var(--muted);
+  display:flex;gap:var(--s2);align-items:center;flex-wrap:wrap;
+  margin-bottom:var(--s2);
+}
+.lead-meta b{color:var(--ink);font-weight:600;}
+.lead h2{
+  margin:0;
+  font-size:1.72rem;line-height:1.3;font-weight:700;
+  letter-spacing:-.01em;
+  max-width:26ch;
+}
+.lead h2 a{text-decoration:none;}
+.lead h2 a:hover,.lead h2 a:focus-visible{text-decoration:underline;}
+@media (max-width:32rem){.lead h2{font-size:1.34rem;}}
+
+.tally{
+  margin-top:var(--s3);color:var(--muted);font-size:.85rem;
+}
+.tally span{margin-right:var(--s3);white-space:nowrap;}
+.tally b{color:var(--ink);font-weight:600;}
+
+/* ---------------------------------------------------------- 控制列 */
+.controls{
+  position:sticky;top:0;z-index:5;
+  background:var(--paper);
+  border-bottom:1px solid var(--rule);
+  padding:var(--s2) 0;
+  display:flex;gap:var(--s2);align-items:center;flex-wrap:wrap;
+}
+.chips{display:flex;gap:var(--s1);flex-wrap:wrap;}
+button.chip,button.sort{
+  font:inherit;font-size:.84rem;
+  background:transparent;color:var(--muted);
+  border:1px solid var(--rule);border-radius:1.2em;
+  padding:.18em .85em;cursor:pointer;
+}
+button.chip[aria-pressed="true"]{
+  background:var(--ink);border-color:var(--ink);color:var(--card);
+}
+button.sort{border-radius:.3em;margin-left:auto;}
+select#industry{
+  font:inherit;font-size:.84rem;
+  background:var(--card);color:var(--ink);
+  border:1px solid var(--rule);border-radius:1.2em;
+  padding:.18em .6em;max-width:12rem;
+}
+button.sector{
+  font:inherit;font-size:.82rem;background:none;border:0;padding:0;
+  color:var(--faint);cursor:pointer;text-decoration:underline dotted;
+}
+input[type="search"]{
+  font:inherit;font-size:.88rem;
+  flex:1 1 9rem;min-width:7rem;
+  background:var(--card);color:var(--ink);
+  border:1px solid var(--rule);border-radius:.3em;
+  padding:.28em .6em;
+}
+:focus-visible{outline:2px solid var(--official);outline-offset:2px;}
+
+/* ---------------------------------------------------------- 列表 */
+ol.feed{list-style:none;margin:0;padding:0;}
+li.item{
+  border-bottom:1px solid var(--rule);
+  padding:var(--s3) 0 var(--s3) var(--s3);
+  position:relative;
+}
+/* 左標線就是可信度。線的粗細與實虛承載資訊，不是裝飾 */
+li.item::before{
+  content:"";position:absolute;left:0;top:var(--s3);bottom:var(--s3);
+  border-left:2px solid var(--media);
+}
+li.tier1::before{border-left-width:5px;border-left-color:var(--official);}
+li.tier3::before,li.tier4::before{border-left-style:dashed;color:var(--faint);
+  border-left-color:var(--faint);}
+li.rumour::before{border-left-color:var(--rumour);}
+
+.row-top{
+  display:flex;gap:var(--s2);align-items:baseline;flex-wrap:wrap;
+  font-size:.82rem;color:var(--muted);margin-bottom:.2em;
+}
+.stock{font-weight:600;color:var(--ink);}
+.code{color:var(--faint);}
+button.only{
+  font:inherit;font-size:.82rem;background:none;border:0;padding:0;
+  color:var(--muted);cursor:pointer;text-decoration:underline dotted;
+}
+.kind{color:var(--muted);}
+.when{margin-left:auto;color:var(--faint);white-space:nowrap;}
+.count{color:var(--hot);font-weight:600;}
+.tag-rumour{color:var(--rumour);font-weight:600;}
+
+.head{font-size:1.02rem;line-height:1.5;max-width:42ch;}
+.head a{text-decoration:none;}
+.head a:hover,.head a:focus-visible{text-decoration:underline;}
+
+.empty{padding:var(--s5) 0;color:var(--muted);}
+.empty b{display:block;color:var(--ink);font-size:1.05rem;margin-bottom:var(--s1);}
+
+/* ---------------------------------------------------------- 頁尾 */
+footer{
+  border-top:1px solid var(--rule);
+  margin-top:var(--s4);padding:var(--s3) 0 var(--s5);
+  color:var(--faint);font-size:.8rem;line-height:1.8;
+}
+footer b{color:var(--muted);font-weight:600;}
+.feeds{margin:var(--s2) 0 0;padding:0;list-style:none;}
+.feeds li{display:flex;gap:var(--s2);}
+.feeds .stale{color:var(--rumour);}
+
+@media (prefers-reduced-motion:no-preference){
+  li.item{transition:background .12s ease;}
+}
+li.item:hover{background:var(--card);}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="masthead">
+    <h1>台股消息面</h1>
+    <div class="stamp" id="stamp">載入中</div>
+  </header>
+
+  <section class="lead" id="lead" hidden>
+    <div class="lead-meta" id="lead-meta"></div>
+    <h2 id="lead-head"></h2>
+    <div class="tally" id="tally"></div>
+  </section>
+
+  <nav class="controls" aria-label="篩選">
+    <div class="chips" role="group" aria-label="來源層級">
+      <button class="chip" data-filter="all" aria-pressed="true">全部</button>
+      <button class="chip" data-filter="official" aria-pressed="false">公告</button>
+      <button class="chip" data-filter="media" aria-pressed="false">媒體</button>
+      <button class="chip" data-filter="rumour" aria-pressed="false">傳聞</button>
+    </div>
+    <select id="industry" aria-label="產業別"><option value="">全部產業</option></select>
+    <input type="search" id="q" placeholder="搜尋個股或關鍵字" aria-label="搜尋個股或關鍵字">
+    <button class="sort" id="sort" aria-label="切換排序">熱度排序</button>
+  </nav>
+
+  <main>
+    <ol class="feed" id="feed"></ol>
+    <div class="empty" id="empty" hidden></div>
+  </main>
+
+  <footer id="foot"></footer>
+</div>
+
+<script>
+"use strict";
+
+const el = (id) => document.getElementById(id);
+const state = { data: null, filter: "all", industry: "", q: "", sort: "heat" };
+
+const fmtTime = (iso) => {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
+const esc = (s) => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;");
+
+function matches(ev) {
+  if (state.filter === "official" && ev.tier !== 1) return false;
+  if (state.filter === "media" && ev.tier === 1) return false;
+  if (state.filter === "rumour" && !ev.unverified) return false;
+  if (state.industry && ev.industry !== state.industry) return false;
+  if (!state.q) return true;
+  const hay = `${ev.headline} ${ev.stock_name} ${ev.stock_id} ${ev.type_label} ${ev.industry}`;
+  return hay.toLowerCase().includes(state.q);
+}
+
+function render() {
+  const d = state.data;
+  if (!d) return;
+
+  const items = d.events.filter(matches).sort((a, b) =>
+    state.sort === "heat" ? b.heat - a.heat : b.time.localeCompare(a.time));
+
+  const feed = el("feed");
+  const empty = el("empty");
+
+  if (!items.length) {
+    feed.innerHTML = "";
+    empty.hidden = false;
+    empty.innerHTML = state.q
+      ? `<b>沒有符合「${esc(state.q)}」的消息</b>換個關鍵字，或清除其他篩選條件。`
+      : state.industry
+        ? `<b>${esc(state.industry)}這幾天沒有消息</b>換一個產業，或選「全部產業」。`
+        : "<b>這個區間沒有這一類的消息</b>換一個篩選條件看看。";
+    return;
+  }
+  empty.hidden = true;
+
+  feed.innerHTML = items.map((ev) => {
+    const cls = ["item", "tier" + ev.tier];
+    if (ev.unverified) cls.push("rumour");
+    const head = ev.url
+      ? `<a href="${esc(ev.url)}" target="_blank" rel="noopener">${esc(ev.headline)}</a>`
+      : esc(ev.headline);
+    const count = ev.sources > 1
+      ? `<span class="count">${ev.sources} 家在報</span>` : "";
+    const rumour = ev.unverified ? `<span class="tag-rumour">未證實</span>` : "";
+    return `<li class="${cls.join(" ")}">
+      <div class="row-top">
+        <button class="only" data-stock="${esc(ev.stock_id)}">
+          <span class="stock">${esc(ev.stock_name || "")}</span>
+          <span class="code">${esc(ev.stock_id)}</span>
+        </button>
+        <button class="sector" data-industry="${esc(ev.industry)}">${esc(ev.industry)}</button>
+        <span class="kind">${esc(ev.type_label)}</span>
+        ${rumour}${count}
+        <span class="when">${fmtTime(ev.time)}</span>
+      </div>
+      <div class="head">${head}</div>
+    </li>`;
+  }).join("");
+}
+
+function renderShell() {
+  const d = state.data;
+  el("stamp").textContent =
+    `更新於 ${fmtTime(d.generated_at)}　涵蓋最近 ${d.days} 天`;
+
+  const top = d.events.filter((e) => e.tier !== 1)
+    .sort((a, b) => b.heat - a.heat)[0]
+    || d.events.slice().sort((a, b) => b.heat - a.heat)[0];
+
+  if (top) {
+    el("lead").hidden = false;
+    const bits = [
+      `<b>${esc(top.stock_name || "")} ${esc(top.stock_id)}</b>`,
+      esc(top.industry),
+      esc(top.type_label),
+      fmtTime(top.time),
+    ];
+    if (top.sources > 1) bits.push(`<span class="count">${top.sources} 家在報</span>`);
+    if (top.unverified) bits.push(`<span class="tag-rumour">未證實</span>`);
+    el("lead-meta").innerHTML = bits.join("　");
+    el("lead-head").innerHTML = top.url
+      ? `<a href="${esc(top.url)}" target="_blank" rel="noopener">${esc(top.headline)}</a>`
+      : esc(top.headline);
+  }
+
+  // 產業選單依消息數排序，數量直接寫在選項裡，
+  // 這樣不用點進去就知道今天哪個族群在動
+  const byInd = new Map();
+  d.events.forEach((e) => byInd.set(e.industry, (byInd.get(e.industry) || 0) + 1));
+  const sel = el("industry");
+  [...byInd.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .forEach(([name, n]) => {
+      const o = document.createElement("option");
+      o.value = name;
+      o.textContent = `${name}　${n}`;
+      sel.appendChild(o);
+    });
+
+  const c = d.counts;
+  el("tally").innerHTML =
+    `<span>消息 <b>${c.events}</b> 則</span>` +
+    `<span>個股 <b>${c.stocks}</b> 檔</span>` +
+    `<span>公告 <b>${c.official}</b> 則</span>` +
+    `<span>媒體 <b>${c.media}</b> 則</span>` +
+    (c.unverified ? `<span>未證實 <b>${c.unverified}</b> 則</span>` : "");
+
+  const feeds = (d.sources || []).map((s) => {
+    const stale = s.hours_since == null || s.hours_since > 24;
+    return `<li><span class="${stale ? "stale" : ""}">${esc(s.name)}</span>
+      <span>${s.last_success ? fmtTime(s.last_success) : "尚未成功"}</span></li>`;
+  }).join("");
+
+  el("foot").innerHTML =
+    `<b>這個頁面收的是什麼</b><br>` +
+    `上市櫃市值前 150 大的重大訊息公告與媒體消息，每個交易日更新四次。` +
+    `同一件事若有多家報導會合併成一則，「幾家在報」就是它的熱度。<br><br>` +
+    `只保存標題、時間、來源與連結，不重製新聞內文，點標題到原站閱讀。` +
+    `事件分類與傳聞標記為規則式自動判定，會有誤判。整理參考用，不構成投資建議。` +
+    `<br><br><b>來源最後更新</b><ul class="feeds">${feeds}</ul>`;
+}
+
+function wire() {
+  document.querySelectorAll(".chip").forEach((b) => {
+    b.addEventListener("click", () => {
+      state.filter = b.dataset.filter;
+      document.querySelectorAll(".chip").forEach((o) =>
+        o.setAttribute("aria-pressed", String(o === b)));
+      render();
+    });
+  });
+
+  el("q").addEventListener("input", (e) => {
+    state.q = e.target.value.trim().toLowerCase();
+    render();
+  });
+
+  el("sort").addEventListener("click", () => {
+    state.sort = state.sort === "heat" ? "time" : "heat";
+    el("sort").textContent = state.sort === "heat" ? "熱度排序" : "時間排序";
+    render();
+  });
+
+  // 點個股名稱等於把它填進搜尋框，不另外做一套個股篩選的狀態
+  el("industry").addEventListener("change", (e) => {
+    state.industry = e.target.value;
+    render();
+  });
+
+  el("feed").addEventListener("click", (e) => {
+    const sector = e.target.closest("button.sector");
+    if (sector) {
+      state.industry = sector.dataset.industry;
+      el("industry").value = state.industry;
+      render();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
+    const b = e.target.closest("button.only");
+    if (!b) return;
+    el("q").value = b.dataset.stock;
+    state.q = b.dataset.stock.toLowerCase();
+    render();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  });
+}
+
+// 加上時間戳避免瀏覽器拿到快取的舊資料。
+// 這個頁面一天更新四次，快取一久就會顯示過期內容卻毫無提示。
+fetch("data.json?t=" + Date.now())
+  .then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); })
+  .then((d) => { state.data = d; renderShell(); wire(); render(); })
+  .catch((err) => {
+    el("stamp").textContent = "讀不到資料";
+    el("empty").hidden = false;
+    el("empty").innerHTML =
+      "<b>讀不到 data.json</b>這通常表示排程還沒跑過，或發佈設定指到錯的資料夾。" +
+      "到儲存庫的 Actions 分頁看最近一次執行是不是綠色打勾。";
+    console.error(err);
+  });
+</script>
+</body>
+</html>
