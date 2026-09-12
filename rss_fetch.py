@@ -67,6 +67,63 @@ def classify_media(title: str) -> str:
     return "other"
 
 
+# ---------------------------------------------------------------- 大盤噪音
+
+# 2026-09-12 加入。第一次跑真實資料時，台積電底下出現七八則這種東西：
+#   「國際油價回落『美股終結連4黑』 台積電ADR漲1.22%」
+#   「升息預期已提前反映！美股道瓊終止連4跌強彈509點、台積電ADR漲1.22%」
+#   「台積電ADR11日上漲5.21美元漲幅1.22%折台股2741.37元」
+# 這些是大盤與美股行情播報，台積電只是被拿來當溫度計，不是它的消息。
+# 同一個交易時段會被十幾家媒體各寫一則，不擋掉會把權值股的版面整個淹掉，
+# 而且會讓聚合門檻的校準失真（拿噪音在調參數）。
+
+# 純報價機器人：「台積電ADR11日上漲5.21美元漲幅1.22%折台股2741.37元」
+_ADR_QUOTE = re.compile(r"ADR\s*\d{0,2}\s*日?\s*(上漲|下跌|持平|漲|跌)")
+
+# 公司名後面緊接這些字，代表提到的是衍生商品或海外掛牌，不是公司本身
+_QUOTE_TAIL = re.compile(r"^\s*(ADR|期貨|盤後|夜盤)", re.IGNORECASE)
+
+# 大盤字眼。單獨出現不足以判定，要跟「公司只以報價形式出現」一起用
+_MARKET_WORDS = re.compile(
+    r"美股|道瓊|那斯達克|費城半導體|費半|標普|S&P|加權指數|大盤|台指期"
+    r"|夜盤|盤前|盤後|開盤|收盤|四大指數"
+)
+
+
+def is_market_noise(title: str, primary_id: str, linker: Linker) -> bool:
+    """判斷這則是不是「大盤行情播報」而非個股消息。
+
+    判定條件刻意設得窄，寧可漏擋也不要誤擋個股消息：
+      A. 標題符合 ADR 報價機器人的格式，直接擋。
+      B. 標題有大盤字眼，而且主角公司在標題裡「每一次」出現都緊接著
+         ADR 或期貨這類字，代表它只是被當成行情標的提及。
+
+    反例（必須放行）：
+      「台積電8月營收又破紀錄」          公司名後面不是 ADR
+      「台積電尾盤爆殺單！跌40元力守月線」 有「尾盤」但公司是主角
+    """
+    if _ADR_QUOTE.search(title):
+        return True
+    if not _MARKET_WORDS.search(title):
+        return False
+
+    aliases = linker.aliases.get(primary_id, [])
+    if not aliases:
+        return False
+
+    # 長別名優先。別名表裡「台積」是「台積電」的子字串，若讓短的先命中，
+    # 「台積電ADR」會被切成「台積」+「電ADR」，後綴檢查就永遠失敗。
+    # 正則的交替是最左優先，把長的排前面即可取得最長匹配。
+    pat = re.compile("|".join(re.escape(a) for a in
+                              sorted(aliases, key=len, reverse=True)))
+    seen = False
+    for m in pat.finditer(title):
+        seen = True
+        if not _QUOTE_TAIL.match(title[m.end():m.end() + 4]):
+            return False  # 有一次是正常提及，就不算純報價
+    return seen
+
+
 # ---------------------------------------------------------------- 對股
 
 _DOWNGRADE = {"primary": "direct", "direct": "indirect", "indirect": "indirect"}
@@ -213,7 +270,7 @@ def fetch_source(conn, src, force=False, timeout=30):
 
 # ---------------------------------------------------------------- 寫入
 
-def ingest_entries(conn, linker, src, entries, *, use_desc=True,
+def ingest_entries(conn, linker, src, entries, *, use_desc=False,
                    max_age_days=7, audit=None):
     """把一個來源的項目寫進資料庫。回傳統計 dict。
 
@@ -225,7 +282,7 @@ def ingest_entries(conn, linker, src, entries, *, use_desc=True,
     tier = int(src.get("tier", 3))
     sid = src["id"]
 
-    st = {"new": 0, "merged": 0, "grey": 0, "blocked": 0,
+    st = {"new": 0, "merged": 0, "grey": 0, "blocked": 0, "market": 0,
           "dup": 0, "retitled": 0, "unmatched": 0, "stale": 0}
 
     for e in entries:
@@ -266,6 +323,13 @@ def ingest_entries(conn, linker, src, entries, *, use_desc=True,
             continue
 
         primary = stocks[0][0]
+
+        # 大盤行情播報不建事件。放在對股之後才判斷，是因為要知道主角是誰
+        # 才能檢查它在標題裡是不是只以 ADR 或期貨的形式出現。
+        if is_market_noise(title, primary, linker):
+            st["market"] += 1
+            continue
+
         etype = classify_media(title)
         unverified = linker.is_unverified(title)
 
@@ -391,8 +455,10 @@ def main():
     ap.add_argument("--sources", default="rss_sources.json")
     ap.add_argument("--only", help="只抓指定的 source id")
     ap.add_argument("--force", action="store_true", help="忽略最小間隔")
-    ap.add_argument("--no-desc", action="store_true",
-                    help="只用標題對股，不用摘要輔助")
+    ap.add_argument("--use-desc", action="store_true",
+                    help="標題對不到股時，改用摘要輔助對股。"
+                         "預設關閉：2026-09-12 實測精確度太差，"
+                         "撿回來的是「巴西力爭東協完整夥伴」這類完全無關的新聞")
     ap.add_argument("--max-age-days", type=int, default=7)
     ap.add_argument("--audit", default="cluster_audit.md")
     ap.add_argument("--sim-merge", type=float)
@@ -442,11 +508,12 @@ def main():
         if not entries:
             continue
         st = ingest_entries(conn, linker, src, entries,
-                            use_desc=not args.no_desc,
+                            use_desc=args.use_desc,
                             max_age_days=args.max_age_days,
                             audit=audit)
         print("  新事件 {new}　併入 {merged}　灰帶 {grey}　守門擋下 {blocked}　"
-              "重複 {dup}　改標 {retitled}　不在名單 {unmatched}".format(**st))
+              "大盤噪音 {market}　重複 {dup}　改標 {retitled}　"
+              "不在名單 {unmatched}".format(**st))
         for k, v in st.items():
             totals[k] = totals.get(k, 0) + v
 
@@ -455,7 +522,8 @@ def main():
     print("\n=== 合計 ===")
     if totals:
         print("新事件 {new}　併入既有 {merged}　灰帶 {grey}　守門擋下 {blocked}　"
-              "重複 {dup}　改標 {retitled}　不在名單 {unmatched}".format(**totals))
+              "大盤噪音 {market}　重複 {dup}　改標 {retitled}　"
+              "不在名單 {unmatched}".format(**totals))
     print(f"稽核檔：{args.audit}（{len(audit)} 組判斷）")
 
     for w in health_check(conn, cfg.get("sources", [])):
