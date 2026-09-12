@@ -14,6 +14,14 @@ on:
         description: '強制重建市值名單與別名表'
         type: boolean
         default: true
+      force_rss:
+        description: '忽略 RSS 的最小抓取間隔（連續手動執行時勾這個）'
+        type: boolean
+        default: false
+      sim_merge:
+        description: '事件合併門檻，留空用預設 0.45'
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -32,7 +40,9 @@ jobs:
           python-version: '3.12'
 
       - name: 安裝套件
-        run: pip install requests certifi
+        # feedparser 是這次新增的。RSS 的日期格式、編碼與破損 XML 各家寫法都不同，
+        # 自己用 xml.etree 剖析會一直踩坑，而你無法在本機測試，所以用成熟套件。
+        run: pip install requests certifi feedparser
 
       - name: 更新市值名單與別名表
         # 收盤價 14:30 後才完整，所以排程只在下午那班更新。
@@ -52,6 +62,22 @@ jobs:
         continue-on-error: true
         run: python mops_fetch.py
 
+      - name: 抓取媒體 RSS
+        # 放在 MOPS 之後執行是刻意的：公告先進資料庫，媒體報導後到時才會
+        # 併進既有事件而不是自己開一則。反過來的話，同一件事會先以媒體標題
+        # 建立事件，之後公告進來雖然會因為 tier 較高而覆寫標題，但多繞一圈。
+        continue-on-error: true
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.force_rss }}" = "true" ]; then
+            ARGS="$ARGS --force"
+          fi
+          if [ -n "${{ github.event.inputs.sim_merge }}" ]; then
+            ARGS="$ARGS --sim-merge ${{ github.event.inputs.sim_merge }}"
+          fi
+          echo "參數：$ARGS"
+          python rss_fetch.py $ARGS
+
       - name: 產生摘要
         continue-on-error: true
         run: python report.py --days 3
@@ -66,7 +92,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # 只加入實際存在的檔案，避免第一次執行時因檔案不存在而中斷
-          for f in news.db digest.md universe.csv aliases.json collisions.txt; do
+          for f in news.db digest.md cluster_audit.md universe.csv aliases.json collisions.txt; do
             if [ -f "$f" ]; then git add "$f"; fi
           done
           if git diff --staged --quiet; then
