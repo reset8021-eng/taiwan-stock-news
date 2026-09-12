@@ -378,11 +378,14 @@ def ingest_entries(conn, linker, src, entries, *, use_desc=False,
         # 上一輪只記 merge / grey / blocked，結果稽核檔只有 1 組，
         # 完全看不出「差一點就該併」的配對有多少，等於無法判斷門檻高低。
         if cand:
-            audit.append({
-                "verdict": verdict, "sim": sim, "stock": primary,
-                "new": title, "cand": cand, "src": sid,
-                "from_desc": from_desc,
-            })
+            conn.execute(
+                """INSERT INTO audit_log (run_at, source_id, verdict, sim,
+                                          stock_id, new_title, cand_title, from_desc)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (now.isoformat(), sid, verdict, sim, primary,
+                 title, cand, int(from_desc)),
+            )
+            audit.append(1)  # 只用來算數量，內容以資料庫為準
 
     conn.commit()
     save_state(conn, sid, last_new_count=st["new"] + st["merged"])
@@ -391,55 +394,83 @@ def ingest_entries(conn, linker, src, entries, *, use_desc=False,
 
 # ---------------------------------------------------------------- 稽核報表
 
-def write_audit(audit, path="cluster_audit.md"):
-    """把每一次需要判斷的配對寫出來。
+def write_audit(conn, path="cluster_audit.md", days=3, max_rows=60):
+    """把最近幾天的聚合判斷寫成一份可讀的稽核檔。
 
-    這份檔案的唯一用途是調門檻。看 grey 區有多少該併沒併、
-    merge 區有沒有不該併卻併了，再回頭改 --sim-merge / --sim-grey。
+    兩個修正（2026-09-12）：
+
+    1. 原本最後一區設了「相似度 ≥ 0.15 才顯示」的條件，低於 0.15 的配對
+       被記進統計數字卻不進任何區塊，於是出現「日誌說 12 組、檔案顯示 0 組」
+       這種自相矛盾的結果。現在最後多一個收容區，保證每一組判斷都看得到。
+    2. 原本只呈現當次執行的結果，整份覆寫。排程一天跑四次，前三班的判斷
+       會被蓋掉，而門檻校準恰好需要累積樣本。現在改成讀資料庫裡最近 N 天的紀錄。
     """
     now = datetime.now(TPE)
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        """SELECT verdict, sim, stock_id, new_title, cand_title, source_id,
+                  from_desc, run_at
+           FROM audit_log WHERE run_at >= ? ORDER BY sim DESC""",
+        (since,),
+    ).fetchall()
+
     lines = [
         "# 事件聚合稽核",
         "",
         f"產生時間：{now:%Y-%m-%d %H:%M}（台北）　"
+        f"涵蓋區間：最近 {days} 天　判斷 {len(rows)} 組",
+        "",
         f"門檻：合併 ≥ {aggregate.SIM_MERGE}　灰帶 ≥ {aggregate.SIM_GREY}　"
         f"{aggregate.NGRAM}-gram　時間窗 {aggregate.WINDOW_HOURS} 小時",
         "",
-        "這份檔案只列出「有對照組」的判斷。完全找不到候選事件的新聞不會出現在這裡。",
+        "只列出「有找到對照組」的判斷。完全找不到候選事件的新聞不會出現在這裡。",
         "",
     ]
 
-    groups = [
-        ("合併", [a for a in audit if a["verdict"].startswith("merge")],
-         "分數低於 0.55 的要特別看，那是誤併最可能發生的區間。"),
-        ("灰帶（目前當新事件處理）",
-         [a for a in audit if a["verdict"] == "grey"],
-         "如果這區大量都是該併的，代表合併門檻設太高，把 --sim-merge 調低。"),
-        ("被守門規則擋下", [a for a in audit if a["verdict"].startswith("new(擋下")],
-         "分數很高卻被擋，通常是對的（例如調升與調降）。若發現誤擋，改 aggregate.py 的 _OPPOSITES。"),
-        ("差一點（有候選但分數未達灰帶）",
-         [a for a in audit if a["verdict"] == "new" and a["sim"] >= 0.15],
-         "這一區是判斷門檻高低的主要依據。若裡面大量是同一件事，"
-         "代表灰帶下緣 --sim-grey 設太高；若幾乎都是不同的事，代表目前門檻合理。"),
-    ]
+    shown = set()
 
-    for name, items, hint in groups:
-        lines += [f"## {name}　{len(items)} 組", "", hint, ""]
+    def section(title, pred, hint):
+        items = [r for i, r in enumerate(rows) if i not in shown and pred(r)]
+        for i, r in enumerate(rows):
+            if i not in shown and pred(r):
+                shown.add(i)
+        out = [f"## {title}　{len(items)} 組", "", hint, ""]
         if not items:
-            lines += ["（無）", ""]
-            continue
-        lines += ["| 相似度 | 個股 | 新進標題 | 對照的既有事件 |", "|---|---|---|---|"]
-        for a in sorted(items, key=lambda x: -x["sim"]):
-            mark = "（靠摘要對股）" if a["from_desc"] else ""
-            lines += [
-                f"| {a['sim']:.3f} | {a['stock']} | "
-                f"{a['new'].replace('|', '｜')}{mark} | "
-                f"{a['cand'].replace('|', '｜')} |"
-            ]
-        lines += [""]
+            return out + ["（無）", ""]
+        out += ["| 相似度 | 個股 | 新進標題 | 對照的既有事件 |", "|---|---|---|---|"]
+        for verdict, sim, stock, new, cand, src, fd, _ts in items[:max_rows]:
+            mark = "（靠摘要對股）" if fd else ""
+            out.append(
+                f"| {sim:.3f} | {stock} | "
+                f"{(new or '').replace('|', '｜')}{mark} | "
+                f"{(cand or '').replace('|', '｜')} |")
+        if len(items) > max_rows:
+            out.append(f"| … | | 另有 {len(items) - max_rows} 組未列出 | |")
+        return out + [""]
+
+    lines += section(
+        "合併", lambda r: r[0].startswith("merge"),
+        "分數低於 0.55 的要特別看，那是誤併最可能發生的區間。")
+    lines += section(
+        "灰帶（目前當新事件處理）", lambda r: r[0] == "grey",
+        "如果這區大量都是同一件事，代表合併門檻設太高，把 --sim-merge 調低。")
+    lines += section(
+        "被守門規則擋下", lambda r: r[0].startswith("new(擋下"),
+        "分數很高卻被擋，通常是對的（例如調升與調降）。"
+        "若發現誤擋，改 aggregate.py 的 _OPPOSITES。")
+    lines += section(
+        "差一點（0.15 以上但未達灰帶）", lambda r: (r[1] or 0) >= 0.15,
+        "這一區是判斷門檻高低的主要依據。若裡面大量是同一件事，"
+        "代表灰帶下緣 --sim-grey 設太高。")
+    lines += section(
+        "其餘（相似度低於 0.15）", lambda r: True,
+        "分數低到這種程度，通常代表兩則標題幾乎沒有共同字詞。"
+        "若這區裡仍有明顯是同一件事的配對，代表字元相似度對中文標題的鑑別力不足，"
+        "該走 LLM 判斷而不是繼續調數字。")
 
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
+    return len(rows)
 
 
 # ---------------------------------------------------------------- 主流程
@@ -479,6 +510,8 @@ def main():
                          "撿回來的是「巴西力爭東協完整夥伴」這類完全無關的新聞")
     ap.add_argument("--max-age-days", type=int, default=7)
     ap.add_argument("--audit", default="cluster_audit.md")
+    ap.add_argument("--audit-days", type=int, default=3,
+                    help="稽核檔涵蓋最近幾天的判斷。紀錄累積在資料庫，不會被覆寫")
     ap.add_argument("--sim-merge", type=float)
     ap.add_argument("--sim-grey", type=float)
     ap.add_argument("--ngram", type=int)
@@ -535,14 +568,15 @@ def main():
         for k, v in st.items():
             totals[k] = totals.get(k, 0) + v
 
-    write_audit(audit, args.audit)
+    total_audit = write_audit(conn, args.audit, days=args.audit_days)
 
     print("\n=== 合計 ===")
     if totals:
         print("新事件 {new}　併入既有 {merged}　灰帶 {grey}　守門擋下 {blocked}　"
               "大盤噪音 {market}　重複 {dup}　改標 {retitled}　"
               "不在名單 {unmatched}".format(**totals))
-    print(f"稽核檔：{args.audit}（{len(audit)} 組判斷）")
+    print(f"稽核檔：{args.audit}　本次 {len(audit)} 組判斷，"
+          f"檔案涵蓋最近 {args.audit_days} 天共 {total_audit} 組")
 
     for w in health_check(conn, cfg.get("sources", [])):
         print(w, file=sys.stderr)
