@@ -19,6 +19,8 @@ report.py — 從 news.db 產生可讀的每日摘要
 
 import argparse
 import csv
+import json
+import os
 import re
 import sqlite3
 from collections import defaultdict
@@ -66,16 +68,44 @@ ROUTINE = re.compile(
 ROUTINE_PENALTY = 0.25
 
 
-def load_names(path="universe.csv"):
-    names, ranks = {}, {}
+UNKNOWN_INDUSTRY = "未分類"
+
+
+def load_industry_map(path="industry_map.json"):
+    """代碼轉名稱。universe.csv 的 industry 欄位存的是證交所代碼（如 24），不是文字。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f).get("map", {})
+    except (FileNotFoundError, json.JSONDecodeError, AttributeError):
+        return {}
+
+
+def load_names(path="universe.csv", imap=None):
+    """回傳 (簡稱, 市值排名, 產業名稱)。
+
+    產業別一直都在 universe.csv 裡，只是先前沒拿來用。
+    代碼查不到對照時保留原始代碼並標記，日誌會警告，不會靜靜吃掉。
+    """
+    imap = imap or {}
+    names, ranks, inds = {}, {}, {}
+    unknown = set()
     try:
         with open(path, encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
-                names[row["stock_id"]] = row["name_short"]
-                ranks[row["stock_id"]] = int(row["cap_rank"])
+                sid = row["stock_id"]
+                names[sid] = row["name_short"]
+                ranks[sid] = int(row["cap_rank"])
+                code = (row.get("industry") or "").strip()
+                if not code:
+                    inds[sid] = UNKNOWN_INDUSTRY
+                elif code in imap:
+                    inds[sid] = imap[code]
+                else:
+                    inds[sid] = f"產業別 {code}"
+                    unknown.add(code)
     except (FileNotFoundError, KeyError):
         pass
-    return names, ranks
+    return names, ranks, inds, unknown
 
 
 def load_best_links(conn, event_ids):
@@ -139,14 +169,82 @@ def headline_cell(headline, link_info, unverified):
     return text
 
 
+def write_web(path, rows, links, names, ranks, inds, health, days):
+    """輸出 docs/data.json，給 GitHub Pages 上的靜態頁面讀。
+
+    刻意跟 digest.md 分開產生，也刻意跟 index.html 分開：
+    介面改版不必重跑管線，資料更新也不會動到介面。
+    只輸出標題、時間、來源、連結，跟資料庫裡保存的範圍一致。
+    """
+    now = datetime.now(timezone.utc)
+    events = []
+    for ev, headline, etype, sid, ts, cnt, tier, unv in rows:
+        link = links.get(ev)
+        events.append({
+            "id": ev,
+            "headline": esc(headline),
+            "type": etype,
+            "type_label": TYPE_LABEL.get(etype, etype),
+            "stock_id": sid,
+            "stock_name": names.get(sid, ""),
+            "cap_rank": ranks.get(sid),
+            "industry": inds.get(sid, UNKNOWN_INDUSTRY),
+            "tier": tier,
+            "tier_label": TIER_LABEL.get(tier, str(tier)),
+            "sources": cnt,
+            "unverified": bool(unv),
+            "time": ts,
+            "heat": round(heat(cnt, tier, ts, now), 4),
+            "url": link[0] if link else None,
+        })
+
+    feeds = []
+    for src, last_ok, status, fails, items in health:
+        hours = None
+        if last_ok:
+            try:
+                hours = round(
+                    (now - datetime.fromisoformat(last_ok)).total_seconds() / 3600, 1)
+            except ValueError:
+                pass
+        feeds.append({"name": src, "last_success": last_ok,
+                      "hours_since": hours, "failures": fails or 0})
+
+    n_official = sum(1 for r in rows if r[6] == 1)
+    payload = {
+        "generated_at": now.isoformat(),
+        "days": days,
+        "counts": {
+            "events": len(rows),
+            "stocks": len({r[3] for r in rows}),
+            "official": n_official,
+            "media": len(rows) - n_official,
+            "unverified": sum(1 for r in rows if r[7]),
+        },
+        "sources": feeds,
+        "events": events,
+    }
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+    return len(events)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="news.db")
     ap.add_argument("--days", type=int, default=1)
     ap.add_argument("--out", default="digest.md")
+    ap.add_argument("--web", default="docs/data.json",
+                    help="網站資料檔的輸出位置，設成空字串可停用")
     args = ap.parse_args()
 
-    names, ranks = load_names()
+    imap = load_industry_map()
+    names, ranks, inds, unknown_codes = load_names(imap=imap)
+    if unknown_codes:
+        print("未知產業代碼：" + "、".join(sorted(unknown_codes))
+              + "　請加進 industry_map.json 的 map 區塊")
     conn = sqlite3.connect(args.db)
     now_utc = datetime.now(timezone.utc)
     since = (now_utc - timedelta(days=args.days)).isoformat()
@@ -233,6 +331,30 @@ def main():
             "熱度 = log(1+來源家數) × 來源權重 × 時間衰減。"
             "家數大於 1 代表多家媒體同時在報，是熱度的主要訊號。")
 
+        # ---------------------------------------------------------- 依產業
+        # 「整個族群在動」跟「單一公司出事」意義差很多，
+        # 光看依個股的清單分不出來，所以另外聚一層。
+        by_ind = defaultdict(list)
+        for r in rows:
+            by_ind[inds.get(r[3], UNKNOWN_INDUSTRY)].append(r)
+
+        lines += ["## 依產業", "",
+                  "消息數多不代表重要，但同一個產業同時冒出好幾檔，"
+                  "通常值得回頭看是不是整個族群的事。",
+                  "",
+                  "| 產業 | 消息 | 個股 | 最受關注的一則 |", "|---|---|---|---|"]
+        for ind, evs in sorted(by_ind.items(),
+                               key=lambda kv: (-len(kv[1]), kv[0])):
+            top = max(evs, key=lambda r: score(r))
+            stocks = sorted({r[3] for r in evs},
+                            key=lambda s: ranks.get(s, 9999))
+            shown = "、".join(names.get(s, s) for s in stocks[:5])
+            if len(stocks) > 5:
+                shown += f" 等 {len(stocks)} 檔"
+            lines += [f"| {ind} | {len(evs)} | {shown} | "
+                      f"{headline_cell(top[1], links.get(top[0]), top[7])} |"]
+        lines += [""]
+
         # ---------------------------------------------------------- 依個股
         order = sorted(by_stock, key=lambda s: ranks.get(s, 9999))
 
@@ -247,8 +369,14 @@ def main():
                 ),
             )
             rk = ranks.get(sid)
+            bits = []
+            if rk:
+                bits.append(f"市值第 {rk} 名")
+            ind = inds.get(sid)
+            if ind and ind != UNKNOWN_INDUSTRY:
+                bits.append(ind)
             lines += [f"### {names.get(sid, '')} {sid}"
-                      + (f"　市值第 {rk} 名" if rk else ""), ""]
+                      + ("　" + "　".join(bits) if bits else ""), ""]
             lines += ["| 時間 | 類型 | 來源 | 家數 | 內容 |", "|---|---|---|---|---|"]
             for ev, headline, etype, _s, ts, cnt, tier, unv in evs:
                 lines.append(
@@ -304,6 +432,11 @@ def main():
         f.write("\n".join(lines))
 
     print(f"{args.out}　事件 {len(rows)} 則　個股 {len(by_stock)} 檔")
+
+    if args.web:
+        n = write_web(args.web, rows, links, names, ranks, inds,
+                      health, args.days)
+        print(f"{args.web}　{n} 則")
 
 
 if __name__ == "__main__":
